@@ -1,0 +1,7 @@
+aws_region = "ap-southeast-1"
+project_name = "govtech-project"
+environment = "dev"
+ec2_key_pair_name = "devops-key"
+ec2_instance_type = "t3.micro"
+db_username = "postgres"
+db_password = "HiHeyHeyllo123"
