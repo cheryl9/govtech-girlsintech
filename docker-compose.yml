@@ -1,0 +1,111 @@
+version: "3.9"
+
+# Named volume so Postgres data survives container restarts
+volumes:
+  postgres_data:
+
+# All services talk to each other over this internal network
+# Key concept: inside this network, each service is reachable
+# by its service name (e.g. "auth", "postgres") — NOT localhost
+networks:
+  app_network:
+    driver: bridge
+
+services:
+
+  # ── PostgreSQL ─────────────────────────────────────────────────
+  postgres:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD}
+      # Create all 3 databases on first startup via init script
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./init-db.sql:/docker-entrypoint-initdb.d/init-db.sql
+    networks:
+      - app_network
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # ── Auth Service ───────────────────────────────────────────────
+  auth:
+    build: ./auth
+    restart: unless-stopped
+    ports:
+      - "${AUTH_PORT}:8001"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${AUTH_DB_NAME}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+    networks:
+      - app_network
+    depends_on:
+      postgres:
+        condition: service_healthy   # Wait for Postgres health check to pass
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8001/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Inventory Service ──────────────────────────────────────────
+  inventory:
+    build: ./inventory
+    restart: unless-stopped
+    ports:
+      - "${INVENTORY_PORT}:8002"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${INVENTORY_DB_NAME}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
+    networks:
+      - app_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth:
+        condition: service_healthy   # Inventory needs auth to be up to validate tokens
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8002/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Trade Service ──────────────────────────────────────────────
+  trade:
+    build: ./trade
+    restart: unless-stopped
+    ports:
+      - "${TRADE_PORT}:8003"
+    environment:
+      DB_HOST: postgres
+      DB_PORT: 5432
+      DB_NAME: ${TRADE_DB_NAME}
+      DB_USER: ${POSTGRES_USER}
+      DB_PASSWORD: ${POSTGRES_PASSWORD}
+      AUTH_SERVICE_URL: ${AUTH_SERVICE_URL}
+      INVENTORY_SERVICE_URL: ${INVENTORY_SERVICE_URL}
+    networks:
+      - app_network
+    depends_on:
+      postgres:
+        condition: service_healthy
+      auth:
+        condition: service_healthy
+      inventory:
+        condition: service_healthy   # Trade calls both auth and inventory
+    healthcheck:
+      test: ["CMD-SHELL", "python -c \"import urllib.request; urllib.request.urlopen('http://localhost:8003/health')\""]
+      interval: 10s
+      timeout: 5s
+      retries: 5
