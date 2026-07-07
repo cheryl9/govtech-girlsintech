@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends
+from fastapi import FastAPI, HTTPException, Depends, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import psycopg2
@@ -6,10 +6,52 @@ import httpx
 import os
 import time
 
+from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
+
+
 app = FastAPI(title="Trade Service")
 security = HTTPBearer(auto_error=False)
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth:8001")
 INVENTORY_SERVICE_URL = os.getenv("INVENTORY_SERVICE_URL", "http://inventory:8002")
+
+# Metrics
+REQUEST_COUNT = Counter(
+    "trade_requests_total",
+    "Total requests to trade service",
+    ["method", "endpoint", "status_code"]
+)
+
+REQUEST_LATENCY = Histogram(
+    "trade_request_duration_seconds",
+    "Request duration for trade service",
+    ["endpoint"],
+    buckets = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]
+)
+
+TRADES_COMPLETED = Counter("trade_completed_total", "Total completed trades")
+TRADES_FAILED = Counter(
+    "trade_failed_total",
+    "Total failed trade attempts",
+    ["reason"]
+)
+
+@app.middleware("http")
+async def track_metrics(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request)
+    duration = time.time() - start_time
+    endpoint = request.url.path
+    REQUEST_COUNT.labels(
+        method = request.method,
+        endpoint = endpoint,
+        status_code = response.status_code
+    ).inc()
+    REQUEST_LATENCY.labels(endpoint=endpoint).observe(duration)
+    return response
+
+@app.get("/metrics")
+def metrics():
+    return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
 # DB Connection
 def get_db(): 
@@ -24,7 +66,7 @@ def get_db():
 def init_db():
     conn = get_db()
     cur = conn.cursor()
-    ur.execute("""
+    cur.execute("""
         CREATE TABLE IF NOT EXISTS trades (
             id SERIAL PRIMARY KEY,
             item_id INTEGER NOT NULL,

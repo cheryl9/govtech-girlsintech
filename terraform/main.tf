@@ -99,6 +99,22 @@ resource "aws_security_group" "ec2" {
     cidr_blocks = ["0.0.0.0/0"]
   }
 
+  ingress {
+    description = "Prometheus"
+    from_port = 9090
+    to_port = 9090
+    protocol = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
+  ingress {
+    description = "Grafana"
+    from_port = 3000
+    to_port = 3000
+    protocol = "tcp"
+    cidr_blocks = ["0.0.0.0/0"]
+  }
+
   egress {
     from_port   = 0
     to_port     = 0
@@ -181,24 +197,18 @@ resource "aws_instance" "app" {
   key_name               = var.ec2_key_pair_name          # SSH key pair
   iam_instance_profile   = aws_iam_instance_profile.ec2_profile.name
 
-  # user_data runs as root when the instance first boots — one time only
-  # This installs Docker and Docker Compose automatically
   user_data = <<-EOF
     #!/bin/bash
     set -e
 
-    # Update system packages
     yum update -y
 
-    # Install Docker
     yum install -y docker
     systemctl start docker
     systemctl enable docker
 
-    # Add ec2-user to docker group (so you don't need sudo for docker commands)
     usermod -aG docker ec2-user
 
-    # Install Docker Compose plugin
     mkdir -p /usr/local/lib/docker/cli-plugins
     curl -SL https://github.com/docker/compose/releases/latest/download/docker-compose-linux-x86_64 \
       -o /usr/local/lib/docker/cli-plugins/docker-compose

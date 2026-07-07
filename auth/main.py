@@ -1,6 +1,7 @@
 from fastapi import FastAPI, HTTPException, Depends
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel 
+from prometheus_client import Counter, Histogram, Gauge, generate_latest, CONTENT_TYPE_LATEST
 import os
 import psycopg2
 import time
@@ -9,6 +10,57 @@ import secrets
 
 app = FastAPI(title="Auth Service")
 security = HTTPBearer(auto_error=False)
+
+# Define metrics
+REQUEST_COUNT = Counter(
+    "auth_requests_total"
+    "Total requests to auth service"
+    ["method", "endpoint", "status_code"]
+)
+
+# Histogram for how long each request takes in seconds
+REQUEST_LATENCY = Histogram(
+    "auth_request_duration_seconds",
+    "Request duration for auth service",
+    ["endpoint"],
+    buckets = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]
+)
+
+LOGIN_ATTEMPTS = Counter(
+    "auth_login_attempts_total",
+    "Total login attempts",
+    ["status"]
+)
+
+ACTIVE_SESSIONS = Gauge(
+    "auth_active_sessions",
+    "Number of users currently logged in"
+)
+
+# Middleware 
+@app.middleware("http")
+async def track_metrics(request: Request, call_next):
+    start_time = time.time()
+    response = await call_next(request) # runs the route handler
+    duration = time.time() - start_time
+    endpoint = request.url.path
+
+    REQUEST_COUNT.labels(
+        method = request.method,
+        endpoint = endpoint,
+        status_code = response.status_code
+    ).inc # increment by 1
+
+    REQUEST_LATENCY.labels(endpoint=endpoint).observe(duration)
+    
+    return response 
+# Metrics Endpoint -> Prometheus scrapes this URL every 15 seconds
+@app.get("/metrics")
+def metrics():
+    return Response(
+        content = generate_latest(),
+        media_type = CONTENT_TYPE_LATEST
+    )
 
 # DB Connection
 def get_db():
