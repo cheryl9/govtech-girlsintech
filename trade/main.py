@@ -1,4 +1,4 @@
-from fastapi import FastAPI, HTTPException, Depends, Response
+from fastapi import FastAPI, HTTPException, Depends, Request, Response
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from pydantic import BaseModel
 import psycopg2
@@ -8,13 +8,12 @@ import time
 
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
-
 app = FastAPI(title="Trade Service")
 security = HTTPBearer(auto_error=False)
+
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth:8001")
 INVENTORY_SERVICE_URL = os.getenv("INVENTORY_SERVICE_URL", "http://inventory:8002")
 
-# Metrics
 REQUEST_COUNT = Counter(
     "trade_requests_total",
     "Total requests to trade service",
@@ -25,7 +24,7 @@ REQUEST_LATENCY = Histogram(
     "trade_request_duration_seconds",
     "Request duration for trade service",
     ["endpoint"],
-    buckets = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]
 )
 
 TRADES_COMPLETED = Counter("trade_completed_total", "Total completed trades")
@@ -42,9 +41,9 @@ async def track_metrics(request: Request, call_next):
     duration = time.time() - start_time
     endpoint = request.url.path
     REQUEST_COUNT.labels(
-        method = request.method,
-        endpoint = endpoint,
-        status_code = response.status_code
+        method=request.method,
+        endpoint=endpoint,
+        status_code=response.status_code
     ).inc()
     REQUEST_LATENCY.labels(endpoint=endpoint).observe(duration)
     return response
@@ -53,8 +52,7 @@ async def track_metrics(request: Request, call_next):
 def metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-# DB Connection
-def get_db(): 
+def get_db():
     return psycopg2.connect(
         host=os.getenv("DB_HOST", "postgres"),
         port=os.getenv("DB_PORT", 5432),
@@ -83,28 +81,25 @@ def init_db():
     cur.close()
     conn.close()
 
-# Startup 
 @app.on_event("startup")
 def startup():
     for attempt in range(10):
         try:
             init_db()
-            print("Database initialized successfully.")
+            print("Trade DB initialised")
             return
         except Exception as e:
             print(f"DB not ready yet (attempt {attempt + 1}/10): {e}")
             time.sleep(2)
     raise RuntimeError("Could not connect to DB after 10 attempts")
 
-# Models
 class TradeRequest(BaseModel):
     item_id: int
     quantity: int
 
-# Auth helper
-def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str: 
-    if not credentials: 
-        raise HTTPException(status_code=401, detail = "No token provided")
+def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
+    if not credentials:
+        raise HTTPException(status_code=401, detail="No token provided")
     try:
         response = httpx.get(
             f"{AUTH_SERVICE_URL}/validate",
@@ -112,12 +107,11 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
             timeout=5.0
         )
         if response.status_code != 200:
-            raise HTTPException(status_code=401, detail = "Invalid token")
+            raise HTTPException(status_code=401, detail="Invalid token")
         return response.json()["username"]
     except httpx.RequestError:
-        raise HTTPException(status_code=503, detail = "Auth service unavailable")
+        raise HTTPException(status_code=503, detail="Auth service unavailable")
 
-# Routes
 @app.get("/health")
 def health():
     return {"status": "ok", "service": "trade"}
@@ -128,10 +122,6 @@ def create_trade(
     credentials: HTTPAuthorizationCredentials = Depends(security),
     buyer: str = Depends(get_current_user)
 ):
-    """
-    Buy an item from inventory.
-    The buyer cals this, the item must exist in inventory and belong to someone else. 
-    """
     try:
         item_resp = httpx.get(
             f"{INVENTORY_SERVICE_URL}/items/{trade_req.item_id}",
@@ -140,27 +130,24 @@ def create_trade(
         )
     except httpx.RequestError:
         raise HTTPException(status_code=503, detail="Inventory service unavailable")
-    
+
     if item_resp.status_code == 404:
+        TRADES_FAILED.labels(reason="item_not_found").inc()
         raise HTTPException(status_code=404, detail="Item not found in inventory")
     if item_resp.status_code != 200:
         raise HTTPException(status_code=502, detail="Unexpected inventory service error")
-    
+
     item = item_resp.json()
     seller = item["owner"]
 
     if seller == buyer:
+        TRADES_FAILED.labels(reason="self_trade").inc()
         raise HTTPException(status_code=400, detail="Cannot trade with yourself")
-    
     if item["quantity"] < trade_req.quantity:
-        raise HTTPException(
-            status_code=400,
-            detail=f"Insufficient stock. Available: {item['quantity']}"
-        )
+        TRADES_FAILED.labels(reason="insufficient_stock").inc()
+        raise HTTPException(status_code=400, detail=f"Insufficient stock. Available: {item['quantity']}")
 
     total = round(item["price"] * trade_req.quantity, 2)
-
-    # Record transaction in database
     conn = get_db()
     cur = conn.cursor()
     try:
@@ -171,6 +158,7 @@ def create_trade(
         )
         trade_id = cur.fetchone()[0]
         conn.commit()
+        TRADES_COMPLETED.inc()
         return {
             "trade_id": trade_id,
             "item_id": trade_req.item_id,
@@ -187,7 +175,6 @@ def create_trade(
 
 @app.get("/trades")
 def list_my_trades(username: str = Depends(get_current_user)):
-    """List all trades where the user is buyer or seller"""
     conn = get_db()
     cur = conn.cursor()
     try:
@@ -199,11 +186,9 @@ def list_my_trades(username: str = Depends(get_current_user)):
         )
         rows = cur.fetchall()
         return [
-            {
-                "id": r[0], "item_id": r[1], "seller": r[2], "buyer": r[3],
-                "quantity": r[4], "price_per_unit": float(r[5]),
-                "total_price": float(r[6]), "status": r[7], "created_at": str(r[8])
-            }
+            {"id": r[0], "item_id": r[1], "seller": r[2], "buyer": r[3],
+             "quantity": r[4], "price_per_unit": float(r[5]),
+             "total_price": float(r[6]), "status": r[7], "created_at": str(r[8])}
             for r in rows
         ]
     finally:
@@ -228,6 +213,6 @@ def get_trade(trade_id: int, username: str = Depends(get_current_user)):
             "quantity": row[4], "price_per_unit": float(row[5]),
             "total_price": float(row[6]), "status": row[7], "created_at": str(row[8])
         }
-    finally: 
+    finally:
         cur.close()
         conn.close()

@@ -8,14 +8,13 @@ import time
 
 from prometheus_client import Counter, Histogram, generate_latest, CONTENT_TYPE_LATEST
 
-app = FastAPI(title = "Inventory Service")
+app = FastAPI(title="Inventory Service")
 security = HTTPBearer(auto_error=False)
 
 AUTH_SERVICE_URL = os.getenv("AUTH_SERVICE_URL", "http://auth:8001")
 
-# Metrics
 REQUEST_COUNT = Counter(
-    "inventory+requests_total",
+    "inventory_requests_total",
     "Total requests to inventory service",
     ["method", "endpoint", "status_code"]
 )
@@ -24,7 +23,7 @@ REQUEST_LATENCY = Histogram(
     "inventory_request_duration_seconds",
     "Request duration for inventory service",
     ["endpoint"],
-    buckets = [0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]
+    buckets=[0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1.0, 2.5]
 )
 
 ITEMS_CREATED = Counter("inventory_items_created_total", "Total items created")
@@ -37,24 +36,23 @@ async def track_metrics(request: Request, call_next):
     duration = time.time() - start_time
     endpoint = request.url.path
     REQUEST_COUNT.labels(
-        method = request.method,
-        endpoint = endpoint,
-        status_code = response.status_code
+        method=request.method,
+        endpoint=endpoint,
+        status_code=response.status_code
     ).inc()
-    REQUEST_LATENCY.labels(endpoint-endpoint).observe(duration)
+    REQUEST_LATENCY.labels(endpoint=endpoint).observe(duration)
     return response
 
 @app.get("/metrics")
 def metrics():
     return Response(content=generate_latest(), media_type=CONTENT_TYPE_LATEST)
 
-# DB Connection
 def get_db():
     return psycopg2.connect(
         host=os.getenv("DB_HOST", "postgres"),
         port=os.getenv("DB_PORT", 5432),
-        dbname=os.getenv("DB_NAME", "inventory_db"),
-        user=os.getenv("DB_USER", "inventory_user"),
+        dbname=os.getenv("DB_NAME", "inventorydb"),
+        user=os.getenv("DB_USER", "postgres"),
         password=os.getenv("DB_PASSWORD", "postgres"),
     )
 
@@ -75,7 +73,6 @@ def init_db():
     cur.close()
     conn.close()
 
-# Startup
 @app.on_event("startup")
 def startup():
     for attempt in range(10):
@@ -88,7 +85,6 @@ def startup():
             time.sleep(2)
     raise RuntimeError("Could not connect to DB after 10 attempts")
 
-# Models
 class Item(BaseModel):
     name: str
     quantity: int
@@ -98,10 +94,7 @@ class ItemUpdate(BaseModel):
     quantity: int | None = None
     price: float | None = None
 
-
-# Auth helper
 def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(security)) -> str:
-    """Call the Auth service to validate the token and return username."""
     if not credentials:
         raise HTTPException(status_code=401, detail="No token provided")
     try:
@@ -115,8 +108,7 @@ def get_current_user(credentials: HTTPAuthorizationCredentials = Depends(securit
         return response.json()["username"]
     except httpx.RequestError:
         raise HTTPException(status_code=503, detail="Auth service unavailable")
-    
-# Routes
+
 @app.get("/health")
 def health_check():
     return {"status": "ok", "service": "inventory"}
@@ -127,12 +119,13 @@ def list_items(username: str = Depends(get_current_user)):
     cur = conn.cursor()
     try:
         cur.execute(
-            "SELECT id, name, quantity, price, owner, created_at FROM items WHERE owner = %s", 
+            "SELECT id, name, quantity, price, owner, created_at FROM items WHERE owner = %s",
             (username,)
         )
         rows = cur.fetchall()
         return [
-            {"id": r[0], "name": r[1], "quantity": r[2], "price": float(r[3]), "owner": r[4], "created_at": str(r[5])}
+            {"id": r[0], "name": r[1], "quantity": r[2],
+             "price": float(r[3]), "owner": r[4], "created_at": str(r[5])}
             for r in rows
         ]
     finally:
@@ -150,6 +143,7 @@ def create_item(item: Item, username: str = Depends(get_current_user)):
         )
         item_id = cur.fetchone()[0]
         conn.commit()
+        ITEMS_CREATED.inc()
         return {"id": item_id, "message": "Item created", "owner": username}
     finally:
         cur.close()
@@ -159,17 +153,17 @@ def create_item(item: Item, username: str = Depends(get_current_user)):
 def get_item(item_id: int, username: str = Depends(get_current_user)):
     conn = get_db()
     cur = conn.cursor()
-    try: 
+    try:
         cur.execute(
-            "SELECT id, name, quantity, price, owner, created_at FROM items WHERE id = %s AND owner = %s", 
+            "SELECT id, name, quantity, price, owner, created_at FROM items WHERE id = %s AND owner = %s",
             (item_id, username)
         )
         row = cur.fetchone()
-        if not row: 
+        if not row:
             raise HTTPException(status_code=404, detail="Item not found")
         return {"id": row[0], "name": row[1], "quantity": row[2],
                 "price": float(row[3]), "owner": row[4], "created_at": str(row[5])}
-    finally: 
+    finally:
         cur.close()
         conn.close()
 
@@ -177,44 +171,40 @@ def get_item(item_id: int, username: str = Depends(get_current_user)):
 def update_item(item_id: int, update: ItemUpdate, username: str = Depends(get_current_user)):
     conn = get_db()
     cur = conn.cursor()
-    try: 
+    try:
         fields, values = [], []
-        if update.quantity is not None: 
-            fields.append("quantity = %s"); 
-            values.append(update.quantity)
-
-        if update.price is not None: 
-            fields.append("price = %s"); 
-            values.append(update.price)
-
-        if not fields: 
-            raise HTTPException(status_code = 400, detail = "No fields to update")
-        
+        if update.quantity is not None:
+            fields.append("quantity = %s"); values.append(update.quantity)
+        if update.price is not None:
+            fields.append("price = %s"); values.append(update.price)
+        if not fields:
+            raise HTTPException(status_code=400, detail="No fields to update")
         values += [item_id, username]
         cur.execute(
-            f"UPDATE items SET {','.join(fields)} WHERE id = %s AND owner = %s RETURNING id",
+            f"UPDATE items SET {', '.join(fields)} WHERE id = %s AND owner = %s RETURNING id",
             values
         )
         if not cur.fetchone():
-            raise HTTPException(status_code=404, detail = "Item not found")
+            raise HTTPException(status_code=404, detail="Item not found")
         conn.commit()
-        return { "message": "Item updated"}
-    finally: 
+        return {"message": "Item updated"}
+    finally:
         cur.close()
         conn.close()
 
 @app.delete("/items/{item_id}", status_code=204)
-def delete_item(item_id: int, username: str = Depends(get_current_user)): 
+def delete_item(item_id: int, username: str = Depends(get_current_user)):
     conn = get_db()
     cur = conn.cursor()
-    try: 
+    try:
         cur.execute(
             "DELETE FROM items WHERE id = %s AND owner = %s RETURNING id",
             (item_id, username)
         )
         if not cur.fetchone():
-            raise HTTPException(status_code=404, details="Item not found")
+            raise HTTPException(status_code=404, detail="Item not found")
         conn.commit()
+        ITEMS_DELETED.inc()
     finally:
         cur.close()
         conn.close()
