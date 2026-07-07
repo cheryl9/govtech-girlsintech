@@ -108,3 +108,19 @@ services:
 
 volumes:
   grafana_data:
+
+  # Locust
+  locust:
+    image: locustio/locust:2.28.0
+    ports:
+      - "8089:8089"
+    volumes:
+      - ./locust:/mnt/locust
+    command: -f /mnt/locust/locustfile.py --host http://auth:8001
+    networks:
+      - app_network
+    depends_on:
+      auth:
+        condition: service_healthy
+      inventory:
+        condition: service_healthy
