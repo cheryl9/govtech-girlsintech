@@ -106,9 +106,6 @@ services:
     depends_on:
       - prometheus
 
-volumes:
-  grafana_data:
-
   # Locust
   locust:
     image: locustio/locust:2.28.0
@@ -124,3 +121,6 @@ volumes:
         condition: service_healthy
       inventory:
         condition: service_healthy
+        
+volumes:
+  grafana_data:
